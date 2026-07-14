@@ -1,4 +1,4 @@
-# VERDICT — Universal ZK Integrity Protocol on Midnight
+# VERDICT — Universal ZK Integrity Protocol on Midnight 
 
 ## Project Structure
 
