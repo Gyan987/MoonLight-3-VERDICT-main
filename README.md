@@ -1,4 +1,4 @@
-# VERDICT
+# VERDICT 
 
 This project is built on the [Midnight Network](https://midnight.network/).
 
