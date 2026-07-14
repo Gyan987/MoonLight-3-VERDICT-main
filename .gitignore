@@ -1,4 +1,4 @@
-/node_modules
+/node_modules 
 /dist
 /counter-cli/dist
 /counter-cli/logs/preprod-deploy.json
