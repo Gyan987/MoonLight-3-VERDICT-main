@@ -1,6 +1,6 @@
 #!/bin/bash
 # VERDICT — Start everything: Docker containers + Next.js frontend
-# Usage: bash start.sh
+# Usage: bash start.sh 
 
 set -e
 
