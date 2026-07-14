@@ -1,0 +1,398 @@
+pragma language_version >= 0.20;
+
+import CompactStandardLibrary;
+
+// ═══════════════════════════════════════════════════════
+// VERDICT DAO — Council-based governance for the
+// VERDICT ZK integrity protocol
+//
+// Manages: Guardian registry, Verifier versions, Rulesets
+// ═══════════════════════════════════════════════════════
+
+// === TYPES ===
+
+enum ProposalStatus { pending, accepted, rejected }
+
+struct CheckEntry {
+  nameHash: Bytes<32>,
+  categoryHash: Bytes<32>,
+  templateHash: Bytes<32>,
+  active: Boolean,
+  addedAt: Uint<64>
+}
+
+struct Proposal {
+  checkId: Uint<64>,
+  templateHash: Bytes<32>,
+  proposerHash: Bytes<32>,
+  votesFor: Uint<64>,
+  votesAgainst: Uint<64>,
+  status: ProposalStatus,
+  createdAt: Uint<64>
+}
+
+struct VerifierVersion {
+  versionId: Uint<64>,
+  guardianMask: Uint<64>,
+  guardianCount: Uint<64>,
+  codeHash: Bytes<32>,
+  contractAddress: Bytes<32>,
+  createdAt: Uint<64>,
+  active: Boolean
+}
+
+struct RulesetEntry {
+  rulesetId: Uint<64>,
+  verifierVersion: Uint<64>,
+  enableMask: Uint<64>,
+  paramsHash: Bytes<32>,
+  ownerHash: Bytes<32>,
+  createdAt: Uint<64>,
+  active: Boolean
+}
+
+// === LEDGER STATE ===
+
+export ledger totalChecks: Counter;
+export ledger checkRegistry: Map<Uint<64>, CheckEntry>;
+
+export ledger proposals: Map<Uint<64>, Proposal>;
+export ledger totalProposals: Counter;
+export ledger council: Set<Bytes<32>>;
+export ledger councilSize: Counter;
+export ledger voteThreshold: Uint<64>;
+export ledger votes: Set<Bytes<32>>;
+
+export ledger verifierVersions: Map<Uint<64>, VerifierVersion>;
+export ledger totalVerifierVersions: Counter;
+export ledger latestVerifierVersion: Uint<64>;
+
+export ledger rulesets: Map<Uint<64>, RulesetEntry>;
+export ledger totalRulesets: Counter;
+
+// === WITNESSES ===
+
+witness getCallerHash(): Bytes<32>;
+witness getCurrentTick(): Uint<64>;
+
+// === CONSTRUCTOR ===
+
+constructor(threshold: Uint<64>) {
+  voteThreshold = disclose(threshold);
+  latestVerifierVersion = disclose(0 as Uint<64>);
+}
+
+// ═══════════════════════════════════════════════════════
+// COUNCIL MANAGEMENT
+// ═══════════════════════════════════════════════════════
+
+export circuit registerCouncilMember(memberHash: Bytes<32>): [] {
+  council.insert(disclose(memberHash));
+  councilSize.increment(1);
+  return [];
+}
+
+// ═══════════════════════════════════════════════════════
+// GUARDIAN REGISTRY
+// ═══════════════════════════════════════════════════════
+
+export circuit registerGenesisCheck(
+  id: Uint<64>,
+  nameHash: Bytes<32>,
+  categoryHash: Bytes<32>,
+  templateHash: Bytes<32>
+): [] {
+  const dId = disclose(id);
+  const dName = disclose(nameHash);
+  const dCat = disclose(categoryHash);
+  const dTmpl = disclose(templateHash);
+  const tick = disclose(getCurrentTick());
+
+  const entry = CheckEntry {
+    nameHash: dName,
+    categoryHash: dCat,
+    templateHash: dTmpl,
+    active: true,
+    addedAt: tick
+  };
+
+  checkRegistry.insert(dId, entry);
+  totalChecks.increment(1);
+  return [];
+}
+
+export circuit proposeCheck(checkId: Uint<64>, templateHash: Bytes<32>): [] {
+  const dCheckId = disclose(checkId);
+  const dTmpl = disclose(templateHash);
+  const callerHash = disclose(getCallerHash());
+  const tick = disclose(getCurrentTick());
+
+  const proposal = Proposal {
+    checkId: dCheckId,
+    templateHash: dTmpl,
+    proposerHash: callerHash,
+    votesFor: 0 as Uint<64>,
+    votesAgainst: 0 as Uint<64>,
+    status: ProposalStatus.pending,
+    createdAt: tick
+  };
+
+  proposals.insert(dCheckId, proposal);
+  totalProposals.increment(1);
+  return [];
+}
+
+export circuit vote(proposalId: Uint<64>, voteFor: Boolean): [] {
+  const dPropId = disclose(proposalId);
+  const dVoteFor = disclose(voteFor);
+  const callerHash = disclose(getCallerHash());
+
+  assert(council.member(callerHash), "Not council member");
+
+  const proposalIdBytes = persistentHash<Uint<64>>(dPropId);
+  const voteKey = persistentHash<Vector<2, Bytes<32>>>([proposalIdBytes, callerHash]);
+
+  assert(!votes.member(voteKey), "Already voted");
+  votes.insert(voteKey);
+
+  const p = proposals.lookup(dPropId);
+
+  if (dVoteFor) {
+    const updated = Proposal {
+      checkId: p.checkId,
+      templateHash: p.templateHash,
+      proposerHash: p.proposerHash,
+      votesFor: (p.votesFor + 1) as Uint<64>,
+      votesAgainst: p.votesAgainst,
+      status: p.status,
+      createdAt: p.createdAt
+    };
+    proposals.insert(dPropId, updated);
+  } else {
+    const updated = Proposal {
+      checkId: p.checkId,
+      templateHash: p.templateHash,
+      proposerHash: p.proposerHash,
+      votesFor: p.votesFor,
+      votesAgainst: (p.votesAgainst + 1) as Uint<64>,
+      status: p.status,
+      createdAt: p.createdAt
+    };
+    proposals.insert(dPropId, updated);
+  }
+
+  return [];
+}
+
+export circuit finalizeProposal(
+  proposalId: Uint<64>,
+  nameHash: Bytes<32>,
+  categoryHash: Bytes<32>
+): [] {
+  const dPropId = disclose(proposalId);
+  const dName = disclose(nameHash);
+  const dCat = disclose(categoryHash);
+
+  const p = proposals.lookup(dPropId);
+
+  assert(p.status == ProposalStatus.pending, "Proposal not pending");
+
+  if (p.votesFor >= voteThreshold) {
+    const tick = disclose(getCurrentTick());
+
+    const entry = CheckEntry {
+      nameHash: dName,
+      categoryHash: dCat,
+      templateHash: p.templateHash,
+      active: true,
+      addedAt: tick
+    };
+
+    checkRegistry.insert(p.checkId, entry);
+    totalChecks.increment(1);
+
+    const accepted = Proposal {
+      checkId: p.checkId,
+      templateHash: p.templateHash,
+      proposerHash: p.proposerHash,
+      votesFor: p.votesFor,
+      votesAgainst: p.votesAgainst,
+      status: ProposalStatus.accepted,
+      createdAt: p.createdAt
+    };
+    proposals.insert(dPropId, accepted);
+  } else {
+    const rejected = Proposal {
+      checkId: p.checkId,
+      templateHash: p.templateHash,
+      proposerHash: p.proposerHash,
+      votesFor: p.votesFor,
+      votesAgainst: p.votesAgainst,
+      status: ProposalStatus.rejected,
+      createdAt: p.createdAt
+    };
+    proposals.insert(dPropId, rejected);
+  }
+
+  return [];
+}
+
+// ═══════════════════════════════════════════════════════
+// VERIFIER VERSION MANAGEMENT
+// ═══════════════════════════════════════════════════════
+
+export circuit registerGenesisVerifier(
+  versionId: Uint<64>,
+  guardianMask: Uint<64>,
+  guardianCount: Uint<64>,
+  codeHash: Bytes<32>,
+  contractAddress: Bytes<32>
+): [] {
+  const dVer = disclose(versionId);
+  const dMask = disclose(guardianMask);
+  const dCount = disclose(guardianCount);
+  const dCode = disclose(codeHash);
+  const dAddr = disclose(contractAddress);
+  const tick = disclose(getCurrentTick());
+
+  const version = VerifierVersion {
+    versionId: dVer,
+    guardianMask: dMask,
+    guardianCount: dCount,
+    codeHash: dCode,
+    contractAddress: dAddr,
+    createdAt: tick,
+    active: true
+  };
+
+  verifierVersions.insert(dVer, version);
+  totalVerifierVersions.increment(1);
+  latestVerifierVersion = dVer;
+  return [];
+}
+
+export circuit registerVerifierVersion(
+  versionId: Uint<64>,
+  guardianMask: Uint<64>,
+  guardianCount: Uint<64>,
+  codeHash: Bytes<32>,
+  contractAddress: Bytes<32>
+): [] {
+  const callerHash = disclose(getCallerHash());
+  assert(council.member(callerHash), "Not council member");
+
+  const dVer = disclose(versionId);
+  const dMask = disclose(guardianMask);
+  const dCount = disclose(guardianCount);
+  const dCode = disclose(codeHash);
+  const dAddr = disclose(contractAddress);
+  const tick = disclose(getCurrentTick());
+
+  const version = VerifierVersion {
+    versionId: dVer,
+    guardianMask: dMask,
+    guardianCount: dCount,
+    codeHash: dCode,
+    contractAddress: dAddr,
+    createdAt: tick,
+    active: true
+  };
+
+  verifierVersions.insert(dVer, version);
+  totalVerifierVersions.increment(1);
+  latestVerifierVersion = dVer;
+  return [];
+}
+
+// ═══════════════════════════════════════════════════════
+// RULESET MANAGEMENT
+// ═══════════════════════════════════════════════════════
+
+export circuit registerRuleset(
+  rulesetId: Uint<64>,
+  verifierVersion: Uint<64>,
+  enableMask: Uint<64>,
+  paramsHash: Bytes<32>
+): [] {
+  const dRsId = disclose(rulesetId);
+  const dVerVer = disclose(verifierVersion);
+  const dMask = disclose(enableMask);
+  const dParams = disclose(paramsHash);
+  const callerHash = disclose(getCallerHash());
+  const tick = disclose(getCurrentTick());
+
+  // Verify the referenced verifier version exists and is active
+  const ver = verifierVersions.lookup(dVerVer);
+  assert(ver.active, "Verifier version not active");
+
+  // Verify enableMask is a subset of the verifier's guardianMask
+  assert(dMask <= ver.guardianMask, "Enable mask exceeds verifier guardian mask");
+
+  const entry = RulesetEntry {
+    rulesetId: dRsId,
+    verifierVersion: dVerVer,
+    enableMask: dMask,
+    paramsHash: dParams,
+    ownerHash: callerHash,
+    createdAt: tick,
+    active: true
+  };
+
+  rulesets.insert(dRsId, entry);
+  totalRulesets.increment(1);
+  return [];
+}
+
+export circuit migrateRuleset(
+  rulesetId: Uint<64>,
+  newVerifierVersion: Uint<64>
+): [] {
+  const dRsId = disclose(rulesetId);
+  const dNewVer = disclose(newVerifierVersion);
+  const callerHash = disclose(getCallerHash());
+
+  const rs = rulesets.lookup(dRsId);
+  assert(rs.active, "Ruleset not active");
+  assert(rs.ownerHash == callerHash, "Not ruleset owner");
+
+  const newVer = verifierVersions.lookup(dNewVer);
+  assert(newVer.active, "New verifier version not active");
+  assert(rs.enableMask <= newVer.guardianMask, "Enable mask exceeds new verifier guardian mask");
+
+  const tick = disclose(getCurrentTick());
+
+  const updated = RulesetEntry {
+    rulesetId: rs.rulesetId,
+    verifierVersion: dNewVer,
+    enableMask: rs.enableMask,
+    paramsHash: rs.paramsHash,
+    ownerHash: rs.ownerHash,
+    createdAt: tick,
+    active: true
+  };
+
+  rulesets.insert(dRsId, updated);
+  return [];
+}
+
+export circuit deactivateRuleset(rulesetId: Uint<64>): [] {
+  const dRsId = disclose(rulesetId);
+  const callerHash = disclose(getCallerHash());
+
+  const rs = rulesets.lookup(dRsId);
+  assert(rs.active, "Ruleset already inactive");
+  assert(rs.ownerHash == callerHash, "Not ruleset owner");
+
+  const deactivated = RulesetEntry {
+    rulesetId: rs.rulesetId,
+    verifierVersion: rs.verifierVersion,
+    enableMask: rs.enableMask,
+    paramsHash: rs.paramsHash,
+    ownerHash: rs.ownerHash,
+    createdAt: rs.createdAt,
+    active: false
+  };
+
+  rulesets.insert(dRsId, deactivated);
+  return [];
+}

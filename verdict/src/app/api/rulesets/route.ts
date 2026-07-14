@@ -1,0 +1,48 @@
+import { NextResponse } from "next/server";
+import { getDeployedRulesets, getContractState } from "@/lib/midnight";
+
+export async function GET() {
+  try {
+    const rulesets = getDeployedRulesets();
+
+    const enriched = await Promise.all(
+      rulesets.map(async (rs) => {
+        let totalChecks = 0;
+        let totalFlagged = 0;
+        try {
+          const state = await getContractState(rs.address);
+          if (state) {
+            totalChecks = Number(state.totalChecks);
+            totalFlagged = Number(state.totalFlagged);
+          }
+        } catch {}
+
+        const flaggedRate =
+          totalChecks > 0
+            ? ((totalFlagged / totalChecks) * 100).toFixed(2)
+            : "0.00";
+
+        return {
+          address: rs.address,
+          name: rs.name,
+          description: rs.description,
+          tags: rs.tags || [],
+          enabledChecks: rs.enabledChecks || [],
+          checkCount: rs.checkCount || 10,
+          deployedAt: rs.deployedAt,
+          txHash: rs.txHash,
+          verifierVersion: rs.verifierVersion || "1",
+          enableMask: rs.enableMask || "1023",
+          totalChecks,
+          totalFlagged,
+          flaggedRate: `${flaggedRate}%`,
+          status: "active",
+        };
+      })
+    );
+
+    return NextResponse.json({ rulesets: enriched });
+  } catch (err: any) {
+    return NextResponse.json({ rulesets: [], error: err?.message }, { status: 200 });
+  }
+}
