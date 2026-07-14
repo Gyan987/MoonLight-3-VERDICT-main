@@ -1,4 +1,4 @@
-# VERDICT Protocol — Architecture Diagrams
+# VERDICT Protocol — Architecture Diagrams 
 
 ---
 
