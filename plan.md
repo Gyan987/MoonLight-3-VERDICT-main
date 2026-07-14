@@ -1,4 +1,4 @@
-# VERDICT — Full Battle Plan
+# VERDICT — Full Battle Plan 
 
 **Stack:** Compact (ZK circuits) · `@midnight-ntwrk/dapp-connector-api` · Next.js 14 (App Router) · TypeScript · Tailwind CSS
 **Wallet:** Midnight Lace connector (`window.midnight.mnLace.enable()`)
